@@ -1,0 +1,18 @@
+# Dataset
+data/raw/
+data/processed/
+
+# Videos
+*.avi
+*.mp4
+
+# Models
+*.pt
+*.pth
+
+# Mac files
+.DS_Store
+
+# Python
+__pycache__/
+.ipynb_checkpoints/
