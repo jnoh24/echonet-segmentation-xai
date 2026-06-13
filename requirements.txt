@@ -1,11 +1,15 @@
 torch
 torchvision
 monai
-opencv-python-headless
+opencv-python
 numpy
 pandas
-matplotlib
 scikit-learn
+matplotlib
 tqdm
 jupyter
 pillow
+
+
+
+
