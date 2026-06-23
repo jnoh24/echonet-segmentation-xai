@@ -1,0 +1,17 @@
+item,value
+videos_total,10030.0
+processed_image_mask_pairs,20048.0
+ef_mean,55.748248101920346
+ef_median,59.209108924999995
+median_frame_count,171.0
+median_fps,50.0
+median_ed_es_distance_estimated,16.0
+mean_lv_area_pixels,1196.4859337589785
+mean_lv_area_percent,9.538312609685734
+stride_1_usable_percent,97.97984836392658
+stride_4_usable_percent,95.5606544293695
+stride_6_usable_percent,95.15163607342379
+stride_8_usable_percent,93.55546687948923
+stride_10_usable_percent,90.13866719872307
+xai_centroid_x_mean,60.88410253477994
+xai_centroid_y_mean,52.26423757471415

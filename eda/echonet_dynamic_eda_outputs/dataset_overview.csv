@@ -1,0 +1,10 @@
+metric,value
+number_of_videos,10030
+train_videos,7465
+validation_videos,1288
+test_videos,1277
+unique_studies_or_patients_proxy,10030
+labelled_ed_frames_estimated,10025
+labelled_es_frames_estimated,10025
+unique_labelled_frames,20050
+processed_image_mask_pairs,20048

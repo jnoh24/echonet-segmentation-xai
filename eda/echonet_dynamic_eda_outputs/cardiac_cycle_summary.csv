@@ -1,0 +1,12 @@
+metric,ed_frame_estimated,metric_es,es_frame_estimated,metric_distance,ed_es_distance
+count,10025.0,count,10025.0,count,10025.0
+mean,66.08887780548629,mean,82.84109725685785,mean,16.75221945137157
+median,56.0,median,74.0,median,16.0
+std,39.72966285186368,std,40.60796437330629,std,5.08954643879338
+min,0.0,min,4.0,min,1.0
+max,664.0,max,686.0,max,220.0
+p05,2.0,p05,18.0,p05,11.0
+p25,42.0,p25,58.0,p25,14.0
+p50,56.0,p50,74.0,p50,16.0
+p75,90.0,p75,107.0,p75,19.0
+p95,136.0,p95,154.0,p95,23.0

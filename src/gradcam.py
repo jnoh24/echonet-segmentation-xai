@@ -12,7 +12,7 @@ from torch.nn import functional as F
 @dataclass
 class GradCAMResult:
     heatmaps: np.ndarray
-    logits: torch.Tensor
+    logits: np.ndarray
     layer_name: str
     n_layer_calls: int
 
@@ -60,6 +60,7 @@ class AppendGradCAMHook:
 
     def __init__(self, module: nn.Module) -> None:
         self.entries: list[dict[str, torch.Tensor | None]] = []
+        self.gradient_handles: list[Any] = []
         self.handle = module.register_forward_hook(self._forward_hook)
 
     def _forward_hook(self, module: nn.Module, inputs: tuple[Any, ...], output: Any) -> None:
@@ -71,9 +72,13 @@ class AppendGradCAMHook:
         def save_gradient(gradient: torch.Tensor) -> None:
             entry["gradient"] = gradient
 
-        activation.register_hook(save_gradient)
+        self.gradient_handles.append(activation.register_hook(save_gradient))
 
     def close(self) -> None:
+        for handle in self.gradient_handles:
+            handle.remove()
+        self.gradient_handles.clear()
+        self.entries.clear()
         self.handle.remove()
 
 
@@ -117,24 +122,36 @@ def convlstm_gradcam(
     model.zero_grad(set_to_none=True)
     module = get_module_by_name(model, layer_name)
     hook = AppendGradCAMHook(module)
+    heatmap_chunks: list[np.ndarray] = []
+    logits_np: np.ndarray | None = None
+    n_layer_calls = 0
+    logits: torch.Tensor | None = None
+    target: torch.Tensor | None = None
     try:
         logits = model(sequence)
         target = segmentation_target(logits, target_mask)
         target.backward()
 
         output_size = tuple(sequence.shape[-2:])
-        heatmap_chunks: list[np.ndarray] = []
+        n_layer_calls = len(hook.entries)
         for entry in hook.entries:
             activation = entry["activation"]
             gradient = entry["gradient"]
             if not isinstance(activation, torch.Tensor) or not isinstance(gradient, torch.Tensor):
                 continue
             heatmap_chunks.append(_cam_from_activation_gradient(activation, gradient, output_size))
+        logits_np = logits.detach().cpu().numpy().astype(np.float32)
     finally:
         hook.close()
+        del logits, target
+        model.zero_grad(set_to_none=True)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     if not heatmap_chunks:
         raise RuntimeError(f"No Grad-CAM activations/gradients were captured for layer {layer_name}.")
+    if logits_np is None:
+        raise RuntimeError(f"No Grad-CAM logits were produced for layer {layer_name}.")
 
     heatmaps = np.concatenate(heatmap_chunks, axis=0)
     sequence_length = int(sequence.shape[1])
@@ -151,9 +168,9 @@ def convlstm_gradcam(
 
     return GradCAMResult(
         heatmaps=heatmaps.astype(np.float32),
-        logits=logits.detach(),
+        logits=logits_np,
         layer_name=layer_name,
-        n_layer_calls=len(hook.entries),
+        n_layer_calls=n_layer_calls,
     )
 
 
@@ -169,12 +186,15 @@ def unet_framewise_gradcam(
 
     module = get_module_by_name(model, layer_name)
     heatmaps: list[np.ndarray] = []
-    logits_all: list[torch.Tensor] = []
+    logits_all: list[np.ndarray] = []
     layer_calls = 0
 
     for time_idx in range(sequence.shape[1]):
         model.zero_grad(set_to_none=True)
         hook = AppendGradCAMHook(module)
+        frame: torch.Tensor | None = None
+        logits: torch.Tensor | None = None
+        target: torch.Tensor | None = None
         try:
             frame = sequence[:, time_idx]
             logits = model(frame)
@@ -190,14 +210,18 @@ def unet_framewise_gradcam(
             if not frame_heatmaps:
                 raise RuntimeError(f"No Grad-CAM entries captured for U-Net layer {layer_name}.")
             heatmaps.append(frame_heatmaps[-1][0])
-            logits_all.append(logits.detach())
+            logits_all.append(logits.detach().cpu().numpy().astype(np.float32))
             layer_calls += len(hook.entries)
         finally:
             hook.close()
+            del frame, logits, target
+            model.zero_grad(set_to_none=True)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     return GradCAMResult(
         heatmaps=np.stack(heatmaps, axis=0).astype(np.float32),
-        logits=torch.stack(logits_all, dim=1),
+        logits=np.stack(logits_all, axis=1),
         layer_name=layer_name,
         n_layer_calls=layer_calls,
     )

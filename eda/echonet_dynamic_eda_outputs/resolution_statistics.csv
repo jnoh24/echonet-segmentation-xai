@@ -1,0 +1,8 @@
+metric,value,resolution,count
+mean_width,112.54715852442672,,
+mean_height,112.39242273180459,,
+unique_resolutions,3,,
+most_common_resolution,112x112,,
+,,112x112,10024.0
+,,1024x768,5.0
+,,1040x768,1.0

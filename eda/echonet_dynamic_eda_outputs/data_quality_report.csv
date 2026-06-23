@@ -1,0 +1,8 @@
+check,value
+missing_videos,0
+corrupt_or_unreadable_videos,0
+missing_masks,0
+corrupt_or_unreadable_masks,0
+invalid_image_mask_pairs,0
+outlier_frame_counts_iqr,292
+unique_resolutions,3
