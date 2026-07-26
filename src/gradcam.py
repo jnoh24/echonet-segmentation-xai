@@ -180,7 +180,12 @@ def unet_framewise_gradcam(
     target_mask: torch.Tensor,
     layer_name: str,
 ) -> GradCAMResult:
-    """Run a 2D U-Net independently on each frame from a temporal sequence."""
+    """Run a 2D U-Net independently on each frame from a temporal sequence.
+
+    Backwards compatible target-mask behavior:
+    - ``target_mask`` shaped [B, 1, H, W] uses the same mask for every frame.
+    - ``target_mask`` shaped [B, T, 1, H, W] uses each frame's own mask.
+    """
     if sequence.ndim != 5 or sequence.shape[0] != 1:
         raise ValueError("2D U-Net framewise Grad-CAM expects sequence shape [1, T, C, H, W].")
 
@@ -198,7 +203,11 @@ def unet_framewise_gradcam(
         try:
             frame = sequence[:, time_idx]
             logits = model(frame)
-            target = segmentation_target(logits, target_mask)
+            if target_mask.ndim == 5:
+                frame_target_mask = target_mask[:, time_idx]
+            else:
+                frame_target_mask = target_mask
+            target = segmentation_target(logits, frame_target_mask)
             target.backward()
             output_size = tuple(frame.shape[-2:])
             frame_heatmaps: list[np.ndarray] = []

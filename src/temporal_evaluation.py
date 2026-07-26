@@ -57,6 +57,43 @@ def adjacent_pearson(heatmaps: np.ndarray) -> np.ndarray:
     return np.asarray(values, dtype=np.float64)
 
 
+def dense_saliency_mask_overlap(heatmaps: np.ndarray, masks: np.ndarray, eps: float = 1e-7) -> tuple[np.ndarray, float, float, float]:
+    """Return per-frame and summary saliency-in-mask overlap values.
+
+    ``heatmaps`` are normalized frame-wise exactly like the existing temporal
+    metrics. ``masks`` may be [T, H, W], [T, 1, H, W], or the legacy center-mask
+    shapes [H, W] / [1, H, W].
+    """
+    heatmaps = normalize_heatmaps(heatmaps)
+    masks = np.asarray(masks)
+    if masks.ndim == 4 and masks.shape[1] == 1:
+        masks = masks[:, 0]
+    if masks.ndim == 3 and masks.shape[0] == 1 and masks.shape[1:] == heatmaps.shape[1:]:
+        masks = masks[0]
+    if masks.ndim == 2:
+        center_idx = len(heatmaps) // 2
+        per_frame = np.full((len(heatmaps),), np.nan, dtype=np.float64)
+        mask_bool = masks.astype(bool)
+        total = float(heatmaps[center_idx].sum())
+        per_frame[center_idx] = float(heatmaps[center_idx][mask_bool].sum() / (total + eps))
+    elif masks.ndim == 3 and masks.shape[0] == len(heatmaps):
+        per_frame = []
+        for heatmap, mask in zip(heatmaps, masks):
+            mask_bool = mask.astype(bool)
+            total = float(heatmap.sum())
+            per_frame.append(float(heatmap[mask_bool].sum() / (total + eps)))
+        per_frame = np.asarray(per_frame, dtype=np.float64)
+    else:
+        raise ValueError(f"Dense mask shape {masks.shape} is incompatible with heatmaps shape {heatmaps.shape}.")
+    center_idx = len(heatmaps) // 2
+    return (
+        per_frame,
+        float(np.nanmean(per_frame)) if len(per_frame) else np.nan,
+        float(np.nanstd(per_frame)) if len(per_frame) else np.nan,
+        float(per_frame[center_idx]) if center_idx < len(per_frame) else np.nan,
+    )
+
+
 def center_saliency_mask_overlap(heatmaps: np.ndarray, center_mask: np.ndarray, eps: float = 1e-7) -> float:
     heatmaps = normalize_heatmaps(heatmaps)
     center_mask = np.asarray(center_mask)
@@ -83,7 +120,7 @@ def compute_temporal_saliency_metrics(
 
     consistency = adjacent_pearson(heatmaps)
     saliency_iou = adjacent_iou(binary_saliency)
-    center_overlap = center_saliency_mask_overlap(heatmaps, center_mask)
+    overlap_per_frame, overlap_mean, overlap_std, center_overlap = dense_saliency_mask_overlap(heatmaps, center_mask)
     centroid_step = np.linalg.norm(saliency_motion, axis=1)
 
     row = dict(metadata)
@@ -92,10 +129,14 @@ def compute_temporal_saliency_metrics(
             "saliency_consistency_mean": float(np.nanmean(consistency)) if len(consistency) else np.nan,
             "saliency_centroid_motion_mean": float(np.nanmean(centroid_step)) if len(centroid_step) else np.nan,
             "center_saliency_mask_overlap": center_overlap,
+            "dense_saliency_mask_overlap_mean": overlap_mean,
+            "dense_saliency_mask_overlap_std": overlap_std,
             "temporal_saliency_iou_mean": float(np.nanmean(saliency_iou)) if len(saliency_iou) else np.nan,
             "saliency_percentile": saliency_percentile,
         }
     )
+    for idx, value in enumerate(overlap_per_frame):
+        row[f"saliency_mask_overlap_frame_{idx}"] = float(value) if np.isfinite(value) else np.nan
     for idx, centroid in enumerate(saliency_centroids):
         row[f"saliency_centroid_x_frame_{idx}"] = float(centroid[0])
         row[f"saliency_centroid_y_frame_{idx}"] = float(centroid[1])
@@ -108,6 +149,8 @@ def aggregate_metrics(per_sample: pd.DataFrame) -> pd.DataFrame:
         "saliency_consistency_mean",
         "saliency_centroid_motion_mean",
         "center_saliency_mask_overlap",
+        "dense_saliency_mask_overlap_mean",
+        "dense_saliency_mask_overlap_std",
         "temporal_saliency_iou_mean",
     ]
     available_metrics = [column for column in metric_cols if column in per_sample.columns]
