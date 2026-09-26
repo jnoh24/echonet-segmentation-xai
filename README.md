@@ -1,21 +1,29 @@
-# EchoNet Segmentation & Temporal XAI
+# EchoNet Temporal XAI
 
-This repository contains segmentation and explainability experiments for the
-EchoNet-Dynamic echocardiography dataset. It includes 2D frame-based baselines,
-temporal ConvLSTM U-Net models, variable temporal stride experiments, UNETR, and
-a Grad-CAM temporal explainability evaluation pipeline.
+This repository develops a research framework for temporal explainability in
+echocardiography. The current codebase supports EchoNet-Dynamic preprocessing,
+LV segmentation models, EF-regression models, temporal Grad-CAM extraction,
+optical-flow comparison, and statistical evaluation of temporal saliency.
+
+The long-term goal is to use these tools to evaluate whether explanations follow
+cardiac motion over time, and to use those findings to motivate new
+motion-aware temporal XAI architectures for echocardiography.
 
 ## Project Goals
 
-- Convert EchoNet-Dynamic LV tracing coordinates into reusable binary masks.
-- Train and compare 2D and temporal segmentation models.
-- Study whether wider temporal frame spacing improves ConvLSTM U-Net behavior.
-- Evaluate temporal Grad-CAM explanations across frames, strides, and model types.
-- Keep experiments Kaggle-ready with smoke modes before full runs.
+- Convert EchoNet-Dynamic LV tracings into reusable image/mask datasets.
+- Remove a recurring upper-right burned-in white annotation artifact from echo
+  frames before training and evaluation.
+- Train and compare 2D, ConvLSTM, multitask, and R(2+1)D baselines.
+- Explain LV segmentation and EF-regression predictions with Grad-CAM.
+- Evaluate temporal faithfulness of explanations using framewise saliency
+  consistency, centroid motion, LV-mask overlap, temporal IoU, and optical-flow
+  alignment.
+- Keep experiments Kaggle-compatible with smoke modes before full runs.
 
 ## Dataset Layout
 
-The notebooks expect EchoNet-Dynamic raw data and processed masks in this shape:
+The notebooks expect EchoNet-Dynamic raw data and processed masks in this form:
 
 ```text
 data/
@@ -33,115 +41,333 @@ data/
       *.png
 ```
 
-On Kaggle, the paths can be overridden with:
+On Kaggle, paths are usually set in each notebook configuration cell, or by
+environment variables such as:
 
 ```python
 os.environ["ECHONET_RAW_DIR"] = "/kaggle/input/<raw-dataset>/EchoNet-Dynamic"
 os.environ["ECHONET_PROCESSED_DIR"] = "/kaggle/input/<processed-dataset>/processed"
 ```
 
-## Notebooks
+## Updated Preprocessing
 
-Run notebooks in this general order when starting from raw data:
+The preprocessing pipeline now includes conservative artifact removal for the
+thin diagonal white annotation line that appears in the upper-right region of
+some EchoNet-Dynamic frames.
+
+Relevant files:
 
 ```text
-notebooks/01_explore_dataset.ipynb
+src/artifact_removal.py
 notebooks/02_create_masks.ipynb
+```
+
+The artifact-removal module:
+
+- detects candidate upper-right diagonal annotation lines;
+- uses temporal background consistency to avoid erasing real cardiac anatomy;
+- restricts removal to peripheral/background regions;
+- uses OpenCV inpainting to blend removed pixels into surrounding texture;
+- preserves diagnostic figures for sanity-checking detections.
+
+The processed dataset still contains the standard image/mask pairs:
+
+```text
+processed/
+  metadata.csv
+  images/
+  masks/
+```
+
+`metadata.csv` is required by downstream training notebooks.
+
+## Model Families
+
+### 2D Segmentation Baselines
+
+- MONAI 2D U-Net for framewise LV segmentation.
+- MONAI UNETR baseline for framewise LV segmentation.
+
+Relevant notebooks and modules:
+
+```text
 notebooks/03_train_unet_baseline.ipynb
+notebooks/05_unetr_baseline.ipynb
+src/model.py
+src/train.py
+src/unetr_model.py
+src/unetr_train.py
+```
+
+### ConvLSTM U-Net Segmentation Models
+
+The temporal segmentation baseline uses a ConvLSTM U-Net that receives a short
+frame sequence and predicts the LV segmentation mask for the center frame.
+
+Implemented variants include:
+
+- original adjacent-frame ConvLSTM U-Net;
+- variable temporal stride ConvLSTM U-Nets;
+- bidirectional target-aligned ConvLSTM U-Net with 23-frame windows.
+
+Relevant files:
+
+```text
 notebooks/04_temporal_baseline.ipynb
 notebooks/04_temporal_baseline_variable_strides.ipynb
-notebooks/05_unetr_baseline.ipynb
+notebooks/07_bidirectional_convlstm.ipynb
+src/temporal_model.py
+src/temporal_dataset.py
+src/temporal_dataset_variable_stride.py
+src/bidirectional_convlstm_unet.py
+```
+
+### Multitask Segmentation + EF Models
+
+The repository includes multitask ConvLSTM models that combine LV segmentation
+and EF regression:
+
+- segmentation-primary ConvLSTM with secondary EF regression;
+- EF-primary ConvLSTM with auxiliary LV segmentation;
+- EF-primary ConvLSTM with auxiliary LV segmentation and auxiliary motion head.
+
+The EF-primary models use 23 grayscale frames:
+
+```text
+11 frames before target + target ED/ES frame + 11 frames after target
+```
+
+with temporal stride 2.
+
+Relevant notebooks:
+
+```text
+notebooks/11_multitask_segmentation_ef.ipynb
+notebooks/12_ef_primary_motion_head.ipynb
+notebooks/14_convlstm_ef_regression_gradcam.ipynb
+notebooks/17_multitask_EF_model_temporal_gradcam_evaluation.ipynb
+```
+
+### R(2+1)D EF Baseline
+
+The repository also includes an EF-primary R(2+1)D baseline trained on
+deterministic cardiac-cycle clips. This model is intended as a video backbone
+comparison for future motion-aware EF and XAI models.
+
+Relevant files:
+
+```text
+notebooks/13_r2plus1d_ef_baseline.ipynb
+notebooks/15_r2plus1d_gradcam.ipynb
+src/cardiac_cycle_dataset.py
+src/r2plus1d_ef.py
+src/gradcam_r2plus1d.py
+```
+
+## Explainability Pipelines
+
+### Segmentation Grad-CAM
+
+Segmentation Grad-CAM evaluates temporal stability of LV segmentation
+explanations across 2D U-Net and ConvLSTM U-Net models.
+
+Relevant notebooks:
+
+```text
 notebooks/05_gradcam_temporal_evaluation.ipynb
+notebooks/06_convlstm_gradcam_overlay_generation.ipynb
+notebooks/06_convlstm_gradcam_overlay_generation.py
+notebooks/08_seg_gradcam.ipynb
 ```
 
-### `01_explore_dataset.ipynb`
+Supported target layers include:
 
-Validates the raw EchoNet-Dynamic layout, file metadata, split labels, frame
-geometry, and tracing coverage.
+- 2D U-Net final convolution;
+- 2D U-Net encoder bottleneck;
+- ConvLSTM encoder bottleneck;
+- ConvLSTM temporal bottleneck;
+- ConvLSTM decoder3.
 
-### `02_create_masks.ipynb`
+### EF Grad-CAM For ConvLSTM Models
 
-Converts `VolumeTracings.csv` LV tracing coordinates into processed image/mask
-PNG pairs and writes `data/processed/metadata.csv`.
+EF Grad-CAM explains the EF-regression scalar output, not the segmentation or
+motion losses. The pipeline supports two EF attribution modes:
 
-### `03_train_unet_baseline.ipynb`
+- `encoder_bottleneck`: faithful per-frame attribution from frame-specific
+  encoder activations;
+- `temporal_representation`: EF-head probe maps from fused bidirectional
+  temporal representations. These are useful diagnostics, but non-target
+  timesteps are counterfactual probes rather than official model predictions.
 
-Trains the 2D MONAI U-Net baseline on processed center-frame image/mask pairs
-using the official EchoNet split when available.
-
-### `04_temporal_baseline.ipynb`
-
-Trains the original ConvLSTM U-Net baseline with adjacent five-frame windows:
+Relevant files:
 
 ```text
-t-2, t-1, t, t+1, t+2
+notebooks/14_convlstm_ef_regression_gradcam.ipynb
+src/gradcam_ef_regression.py
 ```
 
-The model predicts only the center-frame mask.
+Saved CAM variants include:
 
-### `04_temporal_baseline_variable_strides.ipynb`
+- signed raw CAMs;
+- positive CAMs;
+- clip-normalized positive CAMs;
+- frame-normalized positive CAMs for visualization;
+- signed clip-normalized CAMs;
+- robust signed display variants for visualization.
 
-Trains the same ConvLSTM U-Net architecture using configurable temporal strides:
+### Multitask EF Temporal Grad-CAM Evaluation
+
+The full temporal evaluation notebook computes quantitative temporal metrics for
+both EF-primary multitask models and both EF Grad-CAM types.
+
+Relevant notebook:
 
 ```text
-stride 4:  t-8,  t-4,  t, t+4,  t+8
-stride 6:  t-12, t-6,  t, t+6,  t+12
-stride 8:  t-16, t-8,  t, t+8,  t+16
-stride 10: t-20, t-10, t, t+10, t+20
+notebooks/17_multitask_EF_model_temporal_gradcam_evaluation.ipynb
 ```
 
-It keeps the official EchoNet split unchanged and saves each stride separately:
+Core outputs include:
 
 ```text
-outputs/runs/convlstm_unet_variable_strides/
-  convlstm_unet_stride_4/
-  convlstm_unet_stride_6/
-  convlstm_unet_stride_8/
-  convlstm_unet_stride_10/
+temporal_gradcam_per_sample_metrics.csv
+temporal_gradcam_dataset_summary.csv
+temporal_gradcam_paired_statistics.csv
+temporal_gradcam_frame_metrics.csv
+temporal_gradcam_transition_metrics.csv
 ```
 
-It also writes validation/test comparison tables and selects the best stride
-using validation Dice only.
+The quantitative convention is:
 
-### `05_unetr_baseline.ipynb`
+- raw positive CAMs (`positive_cams`) are used for saliency consistency,
+  mass-weighted centroid motion, and LV saliency overlap;
+- clip-normalized CAMs (`clip_normalized_cams`) are used only when a common
+  fixed threshold is needed, especially temporal saliency IoU;
+- frame-normalized and signed CAMs are supplementary visualization/diagnostic
+  outputs.
 
-Trains a MONAI UNETR baseline on the same processed image/mask pairs and official
-EchoNet split.
+### Optical Flow And Motion Alignment
 
-### `05_gradcam_temporal_evaluation.ipynb`
+Optical-flow notebooks compare saliency against estimated cardiac motion. The
+current flow pipeline uses RAFT, dynamic LV masks, transition-level Grad-CAM
+saliency, and motion-saliency metrics.
 
-Loads trained checkpoints and computes Grad-CAM temporal explainability metrics
-on the official test set only. It supports:
+Relevant notebooks:
 
-- ConvLSTM U-Net stride 1, 4, 6, 8, and 10 checkpoints.
-- ConvLSTM target layers:
-  - `bottleneck_encoder`
-  - `temporal_bottleneck`
-  - `decoder3`
-- 2D U-Net baseline Grad-CAM run independently on each frame of the same
-  five-frame temporal windows.
-- Smoke mode on one official test sequence.
-- Full mode on the complete official test set.
+```text
+notebooks/16_convlstm_optical_flow_and_gradcam_comparison.ipynb
+notebooks/19_optical_flow_explanation_faithfulness.ipynb
+```
 
-Metrics kept in the current Grad-CAM pipeline:
+The optical-flow faithfulness pipeline computes metrics such as:
 
-- Saliency consistency across frames.
-- Saliency centroid motion.
-- Temporal saliency IoU.
-- Center-frame CAM overlap with the center-frame LV ground-truth mask.
+- saliency-weighted flow magnitude;
+- correlation between flow magnitude and Grad-CAM;
+- overlap between high-motion and high-saliency regions;
+- saliency contained inside moving LV regions;
+- flow-warped Grad-CAM consistency where feasible.
 
-The processed dataset does not contain LV masks for neighboring temporal frames,
-so saliency-cardiac motion alignment and per-frame LV mask motion metrics are not
-computed.
+### Statistical Testing
+
+Notebook 20 performs analysis-only statistical testing on saved temporal metric
+outputs. It does not rerun inference, Grad-CAM, or optical flow.
+
+Relevant notebook:
+
+```text
+notebooks/20_gradcam_temporal_evaluation_statistical_testing.ipynb
+```
+
+Typical outputs:
+
+```text
+descriptive_statistics.csv
+wilcoxon_final_explanations.csv
+wilcoxon_internal_representations.csv
+friedman_stride_effects.csv
+wilcoxon_stride_posthoc.csv
+publication_summary_table.csv
+publication_summary_table.tex
+data_validation_report.txt
+figures/
+```
+
+## Notebook Guide
+
+Run notebooks in stages depending on the experiment.
+
+### Data And Preprocessing
+
+```text
+01_explore_dataset.ipynb
+02_create_masks.ipynb
+18_segmentation_pseudolabels.ipynb
+```
+
+- `01_explore_dataset.ipynb`: validates raw EchoNet-Dynamic paths, file lists,
+  splits, video metadata, and tracing coverage.
+- `02_create_masks.ipynb`: creates processed image/mask pairs and optionally
+  applies artifact removal.
+- `18_segmentation_pseudolabels.ipynb`: generates dense LV pseudo-labels for
+  frames needed by later Grad-CAM and optical-flow analyses.
+
+### Segmentation Models
+
+```text
+03_train_unet_baseline.ipynb
+04_temporal_baseline.ipynb
+04_temporal_baseline_variable_strides.ipynb
+05_unetr_baseline.ipynb
+07_bidirectional_convlstm.ipynb
+```
+
+### Multitask And EF Models
+
+```text
+11_multitask_segmentation_ef.ipynb
+12_ef_primary_motion_head.ipynb
+13_r2plus1d_ef_baseline.ipynb
+```
+
+### Grad-CAM And Temporal XAI
+
+```text
+05_gradcam_temporal_evaluation.ipynb
+08_seg_gradcam.ipynb
+14_convlstm_ef_regression_gradcam.ipynb
+15_r2plus1d_gradcam.ipynb
+17_multitask_EF_model_temporal_gradcam_evaluation.ipynb
+20_gradcam_temporal_evaluation_statistical_testing.ipynb
+```
+
+### Motion And Optical Flow
+
+```text
+09_motion_metrics.ipynb
+16_convlstm_optical_flow_and_gradcam_comparison.ipynb
+19_optical_flow_explanation_faithfulness.ipynb
+```
+
+### Ablations
+
+```text
+10_temporal_bypass_ablation.ipynb
+```
 
 ## Source Modules
+
+```text
+src/artifact_removal.py
+```
+
+Artifact detection and inpainting for upper-right white annotation lines in
+EchoNet frames.
 
 ```text
 src/utils.py
 ```
 
-Common utilities for paths, seeding, EchoNet table loading, video frame reading,
-mask creation, overlays, JSON writing, and preprocessing traced frames.
+EchoNet table loading, video frame reading, mask creation, preprocessing,
+plotting, and general utility functions.
 
 ```text
 src/dataset.py
@@ -152,153 +378,83 @@ official EchoNet split helpers.
 
 ```text
 src/model.py
-```
-
-2D MONAI U-Net builder and simple mask prediction helper.
-
-```text
 src/train.py
 ```
 
-2D U-Net loss, training loop, evaluation, checkpoint saving, training curves, and
-prediction example visualizations.
+2D U-Net model construction, training, evaluation, checkpointing, and example
+visualization utilities.
 
 ```text
 src/temporal_dataset.py
-```
-
-Original adjacent-frame temporal dataset for the stride-1 ConvLSTM baseline.
-
-```text
 src/temporal_dataset_variable_stride.py
-```
-
-Configurable temporal dataset for five-frame windows with arbitrary positive
-frame stride. It also records frame indices, FPS, and approximate temporal window
-span in seconds.
-
-```text
 src/temporal_model.py
-```
-
-ConvLSTM U-Net model definition. It encodes each frame, fuses bottleneck
-features with a ConvLSTM cell, and decodes a center-frame segmentation mask.
-
-```text
 src/temporal_train.py
-```
-
-Original ConvLSTM U-Net training and evaluation utilities.
-
-```text
 src/temporal_train_version_2.py
 ```
 
-Variable-stride ConvLSTM training/evaluation utilities with validation Dice
-model selection, early stopping, final held-out test evaluation, segmentation
-metrics, temporal LV area summaries, and per-video area curve artifacts.
+Temporal ConvLSTM U-Net datasets, models, and training/evaluation utilities.
 
 ```text
-src/unetr_model.py
-src/unetr_train.py
+src/bidirectional_convlstm_unet.py
 ```
 
-MONAI UNETR model builder plus training, evaluation, plotting, prediction, JSON,
-and experiment logging utilities.
+Target-aligned bidirectional ConvLSTM U-Net used by newer segmentation and
+multitask experiments.
+
+```text
+src/cardiac_cycle_dataset.py
+src/r2plus1d_ef.py
+```
+
+Cardiac-cycle sampling and R(2+1)D EF-regression model utilities.
 
 ```text
 src/gradcam.py
+src/gradcam_ef_regression.py
+src/gradcam_r2plus1d.py
 ```
 
-Grad-CAM helpers for ConvLSTM U-Net and framewise 2D U-Net evaluation. ConvLSTM
-hooks append activations and gradients for repeated temporal layer calls so
-per-frame heatmaps can be saved.
+Grad-CAM implementations for segmentation ConvLSTM/2D U-Net, EF-regression
+ConvLSTM, and R(2+1)D video models.
 
 ```text
 src/temporal_evaluation.py
-```
-
-Temporal saliency metric functions and aggregation helpers.
-
-```text
 src/visualization.py
 ```
 
-Heatmap saving, overlay grid saving, name sanitization, and metric plot helpers.
-
-## Checkpoint Layout For Grad-CAM
-
-Because each ConvLSTM checkpoint is named `best_model.pt`, folder structure is
-important. Recommended Kaggle layout:
-
-```text
-/kaggle/input/convlstm-stride-1/
-  checkpoints/
-    best_model.pt
-
-/kaggle/input/convlstm_variable_strides/
-  convlstm_unet_stride_4/
-    checkpoints/
-      best_model.pt
-  convlstm_unet_stride_6/
-    checkpoints/
-      best_model.pt
-  convlstm_unet_stride_8/
-    checkpoints/
-      best_model.pt
-  convlstm_unet_stride_10/
-    checkpoints/
-      best_model.pt
-
-/kaggle/input/unet-baseline/
-  best_unet.pt
-```
-
-Then set:
-
-```python
-os.environ["CONVLSTM_STRIDE1_RUN_DIR"] = "/kaggle/input/convlstm-stride-1"
-os.environ["CONVLSTM_VARIABLE_STRIDE_RUN_DIR"] = "/kaggle/input/convlstm_variable_strides"
-os.environ["UNET_CHECKPOINT_PATH"] = "/kaggle/input/unet-baseline/best_unet.pt"
-```
+Temporal saliency metrics, aggregation helpers, heatmap saving, overlays, and
+metric plots.
 
 ## Outputs
 
-Common output locations:
+Common run locations:
 
 ```text
-outputs/
-  checkpoints/
-  figures/
-  runs/
-    convlstm_unet/
-    convlstm_unet_variable_strides/
-    gradcam_temporal_evaluation/
+outputs/runs/
+outputs/updated_preprocessing/
+outputs/iMIMIC_additional_experiments/
 ```
 
-The Grad-CAM notebook writes:
+Important output types:
+
+- `config.json`: exact run configuration.
+- `checkpoints/`: model checkpoints.
+- `manifests/`: prediction tables, Grad-CAM manifests, metric tables, and
+  evaluation summaries.
+- `npz/`: saved CAM arrays, dynamic masks, or flow arrays.
+- `overlays/`, `figures/`, `qualitative_examples/`: visualization outputs.
+
+Representative result files:
 
 ```text
-outputs/runs/gradcam_temporal_evaluation/
-  heatmaps/
-  overlays/
-  metrics/
-    per_sample_metrics.csv
-    aggregated_metrics.csv
-  figures/
-  tables/
-    checkpoint_discovery.csv
-    comparison_across_strides.csv
-    comparison_across_target_layers.csv
-    comparison_convlstm_vs_unet.csv
-  gradcam_temporal_evaluation_summary.json
-```
-
-Full Grad-CAM mode computes metrics for all selected test samples but saves
-overlay grids only for a limited representative set:
-
-```python
-MAX_OVERLAY_SAMPLES = 1 if RUN_MODE == "smoke" else 20
+normal_test_metrics.json
+model_perturbation_comparison.csv
+ef_gradcam_manifest.csv
+temporal_gradcam_dataset_summary.csv
+temporal_gradcam_per_sample_metrics.csv
+temporal_gradcam_paired_statistics.csv
+motion_saliency_dataset_summary.csv
+flow_transition_metrics.csv
 ```
 
 ## Environment
@@ -313,50 +469,64 @@ Main packages:
 
 - Python
 - PyTorch
+- TorchVision
 - MONAI
 - OpenCV
 - NumPy
 - Pandas
 - Matplotlib
+- SciPy / statsmodels
 - scikit-learn
 - tqdm
 
-Most notebooks include a Kaggle setup cell similar to:
-
-```python
-%pip install -q monai opencv-python-headless pandas matplotlib tqdm
-```
+Most notebooks are designed to run on Kaggle and include setup/configuration
+cells for Kaggle paths, GPU selection, smoke mode, and output directories.
 
 ## Smoke Vs Full Runs
 
-Several experiment notebooks include:
+Many notebooks include a run mode:
 
 ```python
 RUN_MODE = "smoke"
 ```
 
-Use smoke mode first to verify paths, checkpoint loading, data loading, output
-writing, and plotting. After smoke mode succeeds, switch to:
+Use smoke mode first to verify:
+
+- paths;
+- checkpoint loading;
+- dataset shapes;
+- one forward pass;
+- Grad-CAM gradients;
+- output writing;
+- visualization layout.
+
+Then switch to:
 
 ```python
 RUN_MODE = "full"
 ```
 
-Then restart the Kaggle kernel and run the notebook end to end.
+Restart the kernel and run the notebook end to end.
 
 ## Current Status
 
 Implemented:
 
-- EchoNet-Dynamic exploration and mask preprocessing.
-- 2D U-Net baseline.
-- ConvLSTM U-Net stride-1 temporal baseline.
-- ConvLSTM U-Net variable temporal stride experiments.
-- UNETR baseline.
-- Grad-CAM temporal explainability evaluation for ConvLSTM and 2D U-Net models.
+- EchoNet-Dynamic exploration and processed mask generation.
+- Artifact-aware preprocessing with upper-right annotation-line removal.
+- 2D U-Net and UNETR segmentation baselines.
+- ConvLSTM U-Net segmentation baselines with multiple temporal strides.
+- Bidirectional ConvLSTM U-Net segmentation.
+- Multitask segmentation + EF models.
+- EF-primary multitask models with auxiliary segmentation and optional motion
+  head.
+- R(2+1)D EF-regression baseline with cardiac-cycle sampling.
+- Segmentation Grad-CAM temporal evaluation.
+- EF-regression Grad-CAM for ConvLSTM and R(2+1)D models.
+- Optical-flow and Grad-CAM motion-alignment evaluation.
+- Temporal Grad-CAM statistical testing.
 
-Planned/possible extensions:
+Planned research direction:
 
-- Additional temporal XAI methods.
-- Broader robustness/stability tests.
-- Clinical relevance analysis of saliency behavior.
+- use the temporal explanation and motion-alignment framework to design and
+  evaluate new motion-aware temporal XAI architectures for echocardiography.

@@ -19,7 +19,6 @@ try:
         EnsureTyped,
         LoadImaged,
         RandFlipd,
-        RandRotate90d,
         Resized,
         ScaleIntensityd,
     )
@@ -27,6 +26,7 @@ except ImportError:  # Keeps lightweight exploration imports usable before MONAI
     Compose = None
 
 from .utils import DEFAULT_PROCESSED_DIR, list_image_mask_pairs, normalize_video_name
+from .artifact_removal import ArtifactRemovalConfig, clean_frames_with_shared_artifact_mask
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,19 @@ class SplitConfig:
     val_size: float = 0.15
     test_size: float = 0.15
     seed: int = 42
+
+
+@dataclass(frozen=True)
+class TemporalAugmentationConfig:
+    enabled: bool = True
+    probability: float = 0.8
+    rotation_degrees: float = 7.5
+    translate_fraction: float = 0.04
+    scale_min: float = 0.95
+    scale_max: float = 1.05
+    brightness_delta: float = 0.04
+    contrast_min: float = 0.92
+    contrast_max: float = 1.08
 
 
 class EchoNetProcessedDataset(Dataset):
@@ -88,8 +101,7 @@ def get_monai_transforms(
     if augment:
         transforms.extend(
             [
-                RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
-                RandRotate90d(keys=keys, prob=0.25, max_k=3),
+                RandFlipd(keys=keys, prob=0.25, spatial_axis=1),
             ]
         )
     transforms.append(EnsureTyped(keys=keys, dtype=torch.float32))
@@ -160,6 +172,8 @@ class EchoNetTemporalDataset(Dataset):
         temporal_stride: int = 2,
         image_size: tuple[int, int] = (112, 112),
         augment: bool = False,
+        artifact_removal_config: ArtifactRemovalConfig | dict | None = None,
+        augmentation_config: TemporalAugmentationConfig | dict | None = None,
     ) -> None:
         if num_frames_before < 0 or num_frames_after < 0:
             raise ValueError("num_frames_before and num_frames_after must be non-negative.")
@@ -178,6 +192,12 @@ class EchoNetTemporalDataset(Dataset):
         ]
         self.image_size = image_size
         self.augment = augment
+        if isinstance(artifact_removal_config, dict):
+            artifact_removal_config = ArtifactRemovalConfig(**artifact_removal_config)
+        if isinstance(augmentation_config, dict):
+            augmentation_config = TemporalAugmentationConfig(**augmentation_config)
+        self.artifact_removal_config = artifact_removal_config or ArtifactRemovalConfig()
+        self.augmentation_config = augmentation_config or TemporalAugmentationConfig()
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -200,7 +220,7 @@ class EchoNetTemporalDataset(Dataset):
             cap.release()
             raise ValueError(f"Video reports no frames: {video_path}")
 
-        frames: list[np.ndarray] = []
+        raw_frames: list[np.ndarray] = []
         frame_indices: list[int] = []
         for offset in self.offsets:
             frame_idx = min(max(target_frame_idx + offset, 0), frame_count - 1)
@@ -212,15 +232,68 @@ class EchoNetTemporalDataset(Dataset):
                 raise ValueError(f"Could not read frame {frame_idx} from {video_path}")
 
             frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            raw_frames.append(frame)
+
+        cap.release()
+        cleaned_frames, _, _ = clean_frames_with_shared_artifact_mask(
+            raw_frames,
+            representative_frames=raw_frames,
+            config=self.artifact_removal_config,
+        )
+
+        frames: list[np.ndarray] = []
+        for frame in cleaned_frames:
             frame = cv2.resize(
                 frame,
                 (self.image_size[1], self.image_size[0]),
                 interpolation=cv2.INTER_AREA,
             )
             frames.append(frame.astype(np.float32) / 255.0)
-
-        cap.release()
         return np.stack(frames, axis=0), frame_indices, frame_count
+
+    def _augment_sequence_and_mask(
+        self,
+        sequence: np.ndarray,
+        mask: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        config = self.augmentation_config
+        if not config.enabled or random.random() > config.probability:
+            return sequence, mask
+
+        height, width = sequence.shape[-2:]
+        center = ((width - 1) / 2.0, (height - 1) / 2.0)
+        angle = random.uniform(-config.rotation_degrees, config.rotation_degrees)
+        scale = random.uniform(config.scale_min, config.scale_max)
+        tx = random.uniform(-config.translate_fraction, config.translate_fraction) * width
+        ty = random.uniform(-config.translate_fraction, config.translate_fraction) * height
+        matrix = cv2.getRotationMatrix2D(center, angle, scale)
+        matrix[:, 2] += (tx, ty)
+
+        augmented_frames = [
+            cv2.warpAffine(
+                frame,
+                matrix,
+                (width, height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0.0,
+            )
+            for frame in sequence
+        ]
+        augmented_mask = cv2.warpAffine(
+            mask.astype(np.float32),
+            matrix,
+            (width, height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0.0,
+        )
+
+        contrast = random.uniform(config.contrast_min, config.contrast_max)
+        brightness = random.uniform(-config.brightness_delta, config.brightness_delta)
+        augmented_sequence = np.clip(np.stack(augmented_frames, axis=0) * contrast + brightness, 0.0, 1.0)
+        augmented_mask = (augmented_mask > 0.5).astype(np.float32)
+        return augmented_sequence.astype(np.float32), augmented_mask
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str | int]:
         sample = self.samples[idx]
@@ -241,17 +314,11 @@ class EchoNetTemporalDataset(Dataset):
         )
         mask = (mask > 0).astype(np.float32)
 
-        sequence_t = torch.from_numpy(sequence).unsqueeze(1)
-        mask_t = torch.from_numpy(mask).unsqueeze(0)
-
         if self.augment:
-            if random.random() < 0.5:
-                sequence_t = torch.flip(sequence_t, dims=(-1,))
-                mask_t = torch.flip(mask_t, dims=(-1,))
-            if random.random() < 0.25:
-                k = random.randint(1, 3)
-                sequence_t = torch.rot90(sequence_t, k=k, dims=(-2, -1))
-                mask_t = torch.rot90(mask_t, k=k, dims=(-2, -1))
+            sequence, mask = self._augment_sequence_and_mask(sequence, mask)
+
+        sequence_t = torch.from_numpy(sequence.astype(np.float32)).unsqueeze(1)
+        mask_t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0)
 
         return {
             "sequence": sequence_t.contiguous(),

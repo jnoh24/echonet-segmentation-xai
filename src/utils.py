@@ -13,6 +13,13 @@ import pandas as pd
 import torch
 from tqdm.auto import tqdm
 
+from .artifact_removal import (
+    ArtifactRemovalConfig,
+    apply_artifact_mask,
+    clean_frames_with_shared_artifact_mask,
+    save_artifact_diagnostic_figure,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RAW_DIR = PROJECT_ROOT / "data" / "raw" / "EchoNet-Dynamic"
@@ -196,6 +203,7 @@ def preprocess_traced_frames(
     figures_dir: str | Path = DEFAULT_FIGURES_DIR,
     max_samples: int | None = None,
     save_examples: int = 8,
+    artifact_removal_config: ArtifactRemovalConfig | dict | None = None,
 ) -> dict[str, int]:
     """Convert all traced EchoNet frames into image/mask PNG pairs.
 
@@ -208,14 +216,25 @@ def preprocess_traced_frames(
     image_dir = ensure_dir(output_dir / "images")
     mask_dir = ensure_dir(output_dir / "masks")
     figures_dir = ensure_dir(figures_dir)
+    artifact_dir = ensure_dir(figures_dir / "artifact_removal")
+    if isinstance(artifact_removal_config, dict):
+        artifact_removal_config = ArtifactRemovalConfig(**artifact_removal_config)
+    artifact_removal_config = artifact_removal_config or ArtifactRemovalConfig()
 
     grouped = list(tracings.groupby(["FileName", "Frame"], sort=True))
     if max_samples is not None:
         grouped = grouped[:max_samples]
 
+    frames_by_file: dict[str, list[int]] = {}
+    for (file_name, frame_idx), _ in grouped:
+        frames_by_file.setdefault(str(file_name), []).append(int(frame_idx))
+
+    artifact_cache: dict[str, tuple[np.ndarray, dict]] = {}
     saved = 0
     skipped = 0
     examples = 0
+    artifact_detected = 0
+    metadata_rows: list[dict[str, str | int]] = []
 
     for (file_name, frame_idx), rows in tqdm(grouped, desc="preprocess traced frames"):
         video_path = video_path_from_name(file_name, raw_dir)
@@ -231,22 +250,68 @@ def preprocess_traced_frames(
             continue
 
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        file_key = str(file_name)
+        if file_key not in artifact_cache:
+            representative_grays = []
+            for representative_idx in frames_by_file.get(file_key, [int(frame_idx)])[:4]:
+                try:
+                    representative_frame = read_video_frame(video_path, int(representative_idx))
+                except (FileNotFoundError, ValueError):
+                    continue
+                representative_grays.append(cv2.cvtColor(representative_frame, cv2.COLOR_RGB2GRAY))
+            if not representative_grays:
+                representative_grays = [gray]
+            _, artifact_mask, artifact_info = clean_frames_with_shared_artifact_mask(
+                representative_grays,
+                representative_frames=representative_grays,
+                config=artifact_removal_config,
+            )
+            artifact_cache[file_key] = (artifact_mask, artifact_info)
+        else:
+            artifact_mask, artifact_info = artifact_cache[file_key]
+        if artifact_mask.any():
+            gray = apply_artifact_mask(gray, artifact_mask, artifact_removal_config.background_percentile)
+        artifact_detected += int(bool(artifact_info.get("detected", False)))
         stem = f"{Path(normalize_video_name(file_name)).stem}_frame{int(frame_idx):04d}"
-        cv2.imwrite(str(image_dir / f"{stem}.png"), gray)
-        cv2.imwrite(str(mask_dir / f"{stem}.png"), mask)
+        image_name = f"{stem}.png"
+        mask_name = f"{stem}.png"
+        cv2.imwrite(str(image_dir / image_name), gray)
+        cv2.imwrite(str(mask_dir / mask_name), mask)
+        metadata_rows.append(
+            {
+                "video_id": Path(normalize_video_name(file_name)).stem,
+                "frame_idx": int(frame_idx),
+                "image_path": str(Path("images") / image_name),
+                "mask_path": str(Path("masks") / mask_name),
+            }
+        )
         saved += 1
 
         if examples < save_examples:
             polygon = tracing_group_to_polygon(rows)
             save_mask_sanity_figure(
-                frame,
+                gray,
                 mask,
                 polygon,
                 figures_dir / f"preprocess_example_{stem}.png",
                 title=stem,
             )
+            save_artifact_diagnostic_figure(
+                cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY),
+                gray,
+                artifact_mask,
+                artifact_dir / f"artifact_example_{stem}.png",
+                title=f"{stem} detected={artifact_info.get('detected', False)}",
+            )
             examples += 1
 
-    summary = {"saved": saved, "skipped": skipped, "examples": examples}
+    summary = {
+        "saved": saved,
+        "skipped": skipped,
+        "examples": examples,
+        "artifact_detected": artifact_detected,
+        "artifact_removal_enabled": bool(artifact_removal_config.enabled),
+    }
+    pd.DataFrame(metadata_rows).to_csv(output_dir / "metadata.csv", index=False)
     save_json(summary, output_dir / "preprocess_summary.json")
     return summary
